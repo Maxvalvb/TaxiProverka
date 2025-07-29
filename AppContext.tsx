@@ -82,16 +82,61 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsLoading(true);
         setError(null);
         try {
-            const profile = await apiService.login(mode);
-            setClientProfile(profile as UserProfile); // Assuming client profile for simplicity
+            const response = await apiService.login(mode);
+            setClientProfile(response.user);
             setAuth({ isAuthenticated: true, userMode: mode });
             if (!isRehydrating) addToast(`Вы вошли как ${mode}`, 'success');
             
             // Fetch initial data
             const initialDrivers = await apiService.fetchDrivers();
-            setDrivers(initialDrivers);
-            const initialHistory = await apiService.fetchRideHistory();
-            setRideHistory(initialHistory);
+            // Transform backend drivers to frontend format
+            const transformedDrivers = initialDrivers.map(driver => ({
+                id: driver.id,
+                name: driver.user?.name || 'Unknown',
+                rating: driver.rating,
+                photoUrl: driver.user?.photo_url || '',
+                carModel: driver.car_model,
+                licensePlate: driver.license_plate,
+                state: driver.state,
+                earningsToday: driver.earnings_today,
+                pastTrips: [],
+                location: {
+                    lat: driver.location_lat,
+                    lng: driver.location_lng
+                }
+            }));
+            setDrivers(transformedDrivers);
+            
+            try {
+                const initialHistory = await apiService.fetchRideHistory();
+                // Transform ride history if needed
+                const transformedHistory = initialHistory.map(ride => ({
+                    id: ride.id,
+                    date: new Date(ride.created_at).toLocaleDateString(),
+                    pickup: ride.pickup_address,
+                    destination: ride.destination_address,
+                    fare: ride.fare,
+                    driver: ride.driver ? {
+                        id: ride.driver.id,
+                        name: ride.driver.user?.name || 'Unknown',
+                        rating: ride.driver.rating,
+                        photoUrl: ride.driver.user?.photo_url || '',
+                        carModel: ride.driver.car_model,
+                        licensePlate: ride.driver.license_plate,
+                        state: ride.driver.state,
+                        earningsToday: ride.driver.earnings_today,
+                        pastTrips: [],
+                        location: {
+                            lat: ride.driver.location_lat,
+                            lng: ride.driver.location_lng
+                        }
+                    } : {} as Driver
+                }));
+                setRideHistory(transformedHistory);
+            } catch (historyError) {
+                // Ignore history errors for now
+                console.warn('Failed to fetch ride history:', historyError);
+            }
         } catch (e: any) {
             setError(e.message);
             addToast(`Ошибка входа: ${e.message}`, 'error');
@@ -136,7 +181,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setError(null);
         try {
             const newTrip = await apiService.createRide({ pickup, destination, fare: parseInt(fare, 10), rideType, clientProfile });
-            setActiveTrip(newTrip);
+            
+            // Transform backend ride to frontend format
+            const transformedTrip: ActiveTrip = {
+                id: newTrip.id,
+                clientId: newTrip.client_id,
+                clientProfile: clientProfile,
+                driverId: newTrip.driver_id || null,
+                pickup: newTrip.pickup_address,
+                destination: newTrip.destination_address,
+                fare: newTrip.fare,
+                rideType: newTrip.ride_type
+            };
+            
+            setActiveTrip(transformedTrip);
             setAppState(AppState.SEARCHING);
 
             // Start polling for ride status
@@ -144,17 +202,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 try {
                     const statusUpdate = await apiService.getRideStatus(newTrip.id, auth.userMode || UserMode.CLIENT);
                     if (statusUpdate.driver) {
-                        setAssignedDriver(statusUpdate.driver);
+                        // Transform driver data
+                        const transformedDriver = {
+                            id: statusUpdate.driver.id,
+                            name: statusUpdate.driver.user?.name || 'Unknown',
+                            rating: statusUpdate.driver.rating,
+                            photoUrl: statusUpdate.driver.user?.photo_url || '',
+                            carModel: statusUpdate.driver.car_model,
+                            licensePlate: statusUpdate.driver.license_plate,
+                            state: statusUpdate.driver.state,
+                            earningsToday: statusUpdate.driver.earnings_today,
+                            pastTrips: [],
+                            location: {
+                                lat: statusUpdate.driver.location_lat,
+                                lng: statusUpdate.driver.location_lng
+                            }
+                        };
+                        
+                        setAssignedDriver(transformedDriver);
                         setActiveTrip(prev => prev ? { ...prev, driverId: statusUpdate.driver?.id } : null);
                         setAppState(AppState.CONFIRMED);
                         
                         const arrivalTime = Math.round(Math.random() * 300 + 120); // 2-7 mins
                         setEta(arrivalTime);
 
-                        addToast(`Водитель ${statusUpdate.driver.name} принял ваш заказ!`, 'success');
+                        addToast(`Водитель ${transformedDriver.name} принял ваш заказ!`, 'success');
                         stopPolling();
                         setIsFindingDriver(false);
-                    } else if (statusUpdate.status === 'cancelled') {
+                    } else if (statusUpdate.status === 'CANCELLED') {
                         addToast('Водитель отменил заказ. Ищем нового.', 'info');
                         // Reset and search again could be implemented here
                     }
