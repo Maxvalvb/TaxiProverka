@@ -5,155 +5,198 @@ import {
 } from '../types';
 import { getDistance } from '../utils/helpers';
 
-// --- MOCK DATABASE ---
-let mockDrivers: Driver[] = [
-    { id: 'd1', name: 'Алексей', rating: 4.9, photoUrl: 'https://i.pravatar.cc/150?u=driver42', carModel: 'Toyota Camry', licensePlate: 'А123ВС777', state: DriverState.ONLINE, location: { lat: 55.76, lng: 37.64 }, earningsToday: 4200, pastTrips: [] },
-    { id: 'd2', name: 'Сергей', rating: 4.8, photoUrl: 'https://i.pravatar.cc/150?u=driver16', carModel: 'Hyundai Solaris', licensePlate: 'В456УЕ777', state: DriverState.OFFLINE, location: { lat: 55.75, lng: 37.61 }, earningsToday: 0, pastTrips: [] },
-    { id: 'd3', name: 'Дмитрий', rating: 5.0, photoUrl: 'https://i.pravatar.cc/150?u=driver8', carModel: 'Kia Rio', licensePlate: 'Е789КХ777', state: DriverState.ONLINE, location: { lat: 55.74, lng: 37.62 }, earningsToday: 3500, pastTrips: [] },
-];
+// Backend API configuration
+const API_BASE_URL = 'http://localhost:3001/api';
 
-let mockClientProfile: UserProfile = {
-  name: 'Иван Петров',
-  phone: '+7 (999) 123-45-67',
-  email: 'ivan.petrov@email.com',
-  walletBalance: 1250,
-  photoUrl: 'https://i.pravatar.cc/150?u=user1',
-  paymentMethods: [{ id: 'card1', last4: '4242', brand: 'mastercard' }],
-  location: { lat: 55.755, lng: 37.617 }
+// Token management
+let authToken: string | null = localStorage.getItem('authToken');
+
+const setAuthToken = (token: string | null) => {
+    authToken = token;
+    if (token) {
+        localStorage.setItem('authToken', token);
+    } else {
+        localStorage.removeItem('authToken');
+    }
 };
 
-let mockRideHistory: RideHistoryEntry[] = [];
-let mockActiveRides: (ActiveTrip & { status: DriverState | 'cancelled' })[] = [];
+// API request helper
+const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promise<T> => {
+    const url = `${API_BASE_URL}${endpoint}`;
+    
+    const defaultHeaders: HeadersInit = {
+        'Content-Type': 'application/json',
+    };
 
-// --- API Service Simulation ---
-const simulateRequest = <T>(data: T, delay: number = 500): Promise<T> => {
-    return new Promise(resolve => setTimeout(() => resolve(data), delay));
-}
+    if (authToken) {
+        defaultHeaders.Authorization = `Bearer ${authToken}`;
+    }
+
+    const config: RequestInit = {
+        ...options,
+        headers: {
+            ...defaultHeaders,
+            ...options.headers,
+        },
+    };
+
+    if (config.body && typeof config.body === 'object') {
+        config.body = JSON.stringify(config.body);
+    }
+
+    const response = await fetch(url, config);
+    
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Network error' }));
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.data || data;
+};
 
 export const apiService = {
-    async login(mode: UserMode): Promise<UserProfile> {
-        // In a real app, this would hit /api/login and return user data
-        return simulateRequest(mockClientProfile, 1000);
+    async login(mode: UserMode): Promise<{ user: UserProfile, token: string, driver?: Driver }> {
+        const response = await apiRequest<{ user: UserProfile, token: string, driver?: Driver }>('/auth/login', {
+            method: 'POST',
+            body: {
+                phone: '+7 999 123 45 67', // Simplified for demo
+                role: mode
+            }
+        });
+        
+        setAuthToken(response.token);
+        return response;
     },
 
     async fetchDrivers(): Promise<Driver[]> {
-        return simulateRequest([...mockDrivers]);
+        return apiRequest<Driver[]>('/drivers');
     },
 
     async fetchRideHistory(): Promise<RideHistoryEntry[]> {
-        return simulateRequest([...mockRideHistory]);
+        return apiRequest<RideHistoryEntry[]>('/rides/user/me');
     },
     
     async createRide(details: { pickup: string, destination: string, fare: number, rideType: RideType, clientProfile: UserProfile }): Promise<ActiveTrip> {
-        const newRide: ActiveTrip & { status: DriverState } = {
-            id: `ride_${Date.now()}`,
-            clientId: 'user1',
-            driverId: null,
-            status: DriverState.ONLINE, // Initial status, means "searching"
-            ...details
+        const rideData = {
+            pickup_address: details.pickup,
+            destination_address: details.destination,
+            pickup_lat: details.clientProfile.location.lat,
+            pickup_lng: details.clientProfile.location.lng,
+            destination_lat: details.clientProfile.location.lat + 0.01, // Mock destination
+            destination_lng: details.clientProfile.location.lng + 0.01,
+            fare: details.fare,
+            ride_type: details.rideType
         };
-        mockActiveRides.push(newRide);
-        return simulateRequest(newRide, 1000);
+
+        return apiRequest<ActiveTrip>('/rides', {
+            method: 'POST',
+            body: rideData
+        });
     },
 
     async getRideStatus(rideId: string, userMode: UserMode): Promise<{ status: string, driver: Driver | null }> {
-        const ride = mockActiveRides.find(r => r.id === rideId);
-        if (!ride) throw new Error("Ride not found");
-
-        // If a driver is already assigned, return it.
-        if (ride.driverId) {
-            const driver = mockDrivers.find(d => d.id === ride.driverId);
-            return simulateRequest({ status: ride.status, driver: driver || null });
+        try {
+            // First try to find a driver automatically
+            await apiRequest(`/rides/${rideId}/find-driver`, {
+                method: 'POST'
+            });
+        } catch (error) {
+            // Ignore errors from auto-assignment
         }
 
-        // --- Find Driver Logic ---
-        let driverToAssign: Driver | undefined;
+        // Get updated ride info
+        const ride = await apiRequest<ActiveTrip>(`/rides/${rideId}`);
         
-        // Simulation override for predictable testing in Admin/Driver views
-        if (userMode === UserMode.ADMIN || userMode === UserMode.DRIVER) {
-             const d1 = mockDrivers.find(d => d.id === 'd1');
-             if (d1?.state === DriverState.ONLINE) {
-                 driverToAssign = d1;
-             }
-        }
-        
-        // Default logic if override doesn't apply
-        if (!driverToAssign) {
-            const availableDrivers = mockDrivers.filter(d => d.state === DriverState.ONLINE);
-            if (availableDrivers.length > 0) {
-                let closestDriver = availableDrivers[0];
-                let minDistance = getDistance(ride.clientProfile.location.lat, ride.clientProfile.location.lng, closestDriver.location.lat, closestDriver.location.lng);
-                for (let i = 1; i < availableDrivers.length; i++) {
-                    const driver = availableDrivers[i];
-                    const distance = getDistance(ride.clientProfile.location.lat, ride.clientProfile.location.lng, driver.location.lat, driver.location.lng);
-                    if (distance < minDistance) {
-                        minDistance = distance;
-                        closestDriver = driver;
-                    }
-                }
-                driverToAssign = closestDriver;
-            }
-        }
-        
-        if (driverToAssign) {
-            // Assign driver to ride
-            ride.driverId = driverToAssign.id;
-            ride.status = DriverState.TO_PICKUP;
-            // Update driver's state
-            mockDrivers = mockDrivers.map(d => d.id === driverToAssign!.id ? { ...d, state: DriverState.TO_PICKUP } : d);
-            return simulateRequest({ status: ride.status, driver: driverToAssign });
-        }
-        
-        return simulateRequest({ status: 'searching', driver: null });
+        return {
+            status: ride.status,
+            driver: ride.driver || null
+        };
     },
 
     async cancelRide(rideId: string): Promise<{ success: boolean }> {
-        mockActiveRides = mockActiveRides.filter(r => r.id !== rideId);
-        mockDrivers = mockDrivers.map(d => (d.state === DriverState.INCOMING_RIDE || d.state === DriverState.TO_PICKUP) ? {...d, state: DriverState.ONLINE } : d);
-        return simulateRequest({ success: true });
+        await apiRequest(`/rides/${rideId}/cancel`, {
+            method: 'DELETE'
+        });
+        return { success: true };
     },
     
     async updateRideStatus(rideId: string, newStatus: 'TRIP_IN_PROGRESS' | 'TRIP_COMPLETE'): Promise<{ success: boolean }> {
-        const ride = mockActiveRides.find(r => r.id === rideId);
-        if (ride) {
-            mockDrivers = mockDrivers.map(d => d.id === ride.driverId ? { ...d, state: DriverState[newStatus] } : d);
-            if (newStatus === 'TRIP_COMPLETE') {
-                 mockActiveRides = mockActiveRides.filter(r => r.id !== rideId);
+        const statusMap = {
+            'TRIP_IN_PROGRESS': 'IN_PROGRESS',
+            'TRIP_COMPLETE': 'COMPLETED'
+        };
+
+        await apiRequest(`/rides/${rideId}/status`, {
+            method: 'PUT',
+            body: {
+                status: statusMap[newStatus]
             }
-        }
-        return simulateRequest({ success: true });
+        });
+        
+        return { success: true };
     },
 
     async updateDriverEarnings(driverId: string, fare: number): Promise<{ earningsToday: number }> {
-        let earnings = 0;
-        mockDrivers = mockDrivers.map(d => {
-            if (d.id === driverId) {
-                earnings = d.earningsToday + fare;
-                return { ...d, earningsToday: earnings, state: DriverState.ONLINE };
+        const result = await apiRequest<Driver>(`/drivers/${driverId}/earnings`, {
+            method: 'PUT',
+            body: {
+                amount: fare
             }
-            return d;
         });
-        return simulateRequest({ earningsToday: earnings });
+        
+        return { earningsToday: result.earnings_today };
     },
 
-    async sendMessage(text: string, sender: 'user' | 'driver'): Promise<ChatMessage> {
-        const newMessage: ChatMessage = { 
-            id: Date.now(), 
-            sender, 
-            text, 
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
-        };
-        return simulateRequest(newMessage, 200);
+    async sendMessage(text: string, sender: 'user' | 'driver', rideId?: string): Promise<ChatMessage> {
+        if (!rideId) {
+            // For demo purposes, create a mock message
+            return {
+                id: Date.now(),
+                sender,
+                text,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            };
+        }
+
+        return apiRequest<ChatMessage>('/chat/messages', {
+            method: 'POST',
+            body: {
+                ride_id: rideId,
+                message: text
+            }
+        });
     },
 
     async updateProfile(profile: UserProfile): Promise<UserProfile> {
-        mockClientProfile = profile;
-        return simulateRequest(mockClientProfile, 800);
+        const updateData = {
+            name: profile.name,
+            email: profile.email,
+            photo_url: profile.photoUrl
+        };
+
+        return apiRequest<UserProfile>('/users/profile', {
+            method: 'PUT',
+            body: updateData
+        });
     },
 
     async addPaymentCard(profile: UserProfile, card: PaymentCard): Promise<UserProfile> {
-        const newProfile = { ...profile, paymentMethods: [...profile.paymentMethods, card]};
-        mockClientProfile = newProfile;
-        return simulateRequest(newProfile, 600);
+        const cardData = {
+            last4: card.last4,
+            brand: card.brand
+        };
+
+        await apiRequest('/users/payment-cards', {
+            method: 'POST',
+            body: cardData
+        });
+
+        // Return updated profile with new card
+        const cards = await apiRequest<PaymentCard[]>('/users/payment-cards');
+        return {
+            ...profile,
+            paymentMethods: cards
+        };
     }
 };
